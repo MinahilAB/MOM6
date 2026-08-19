@@ -9,6 +9,7 @@ html
 *.mod
 MOM6
 build/
+build_fabm/
 deps/
 pkg/MARBL
 

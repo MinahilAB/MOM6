@@ -60,6 +60,9 @@ use oil_tracer, only : oil_stock, oil_tracer_end, oil_tracer_CS
 use advection_test_tracer, only : register_advection_test_tracer, initialize_advection_test_tracer
 use advection_test_tracer, only : advection_test_tracer_column_physics, advection_test_tracer_surface_state
 use advection_test_tracer, only : advection_test_stock, advection_test_tracer_end, advection_test_tracer_CS
+use FABM_tracer, only : register_FABM_tracer, initialize_FABM_tracer
+use FABM_tracer, only : FABM_tracer_column_physics, FABM_tracer_surface_state
+use FABM_tracer, only : FABM_tracer_set_forcing, FABM_tracer_end, FABM_tracer_CS
 use dyed_obc_tracer, only : register_dyed_obc_tracer, initialize_dyed_obc_tracer
 use dyed_obc_tracer, only : dyed_obc_tracer_column_physics
 use dyed_obc_tracer, only : dyed_obc_tracer_end, dyed_obc_tracer_CS
@@ -103,6 +106,7 @@ type, public :: tracer_flow_control_CS ; private
   logical :: use_boundary_impulse_tracer = .false. !< If true, use the boundary impulse tracer package
   logical :: use_dyed_obc_tracer = .false.         !< If true, use the dyed OBC tracer package
   logical :: use_nw2_tracers = .false.             !< If true, use the NW2 tracer package
+  logical :: use_FABM_tracer = .false.             !< If true, use the FABM tracer bridge
   logical :: get_chl_from_MARBL = .false.          !< If true, use the MARBL-provided Chl for shortwave penetration
   !>@{ Pointers to the control strucures for the tracer packages
   type(USER_tracer_example_CS), pointer :: USER_tracer_example_CSp => NULL()
@@ -121,6 +125,7 @@ type, public :: tracer_flow_control_CS ; private
   type(boundary_impulse_tracer_CS), pointer :: boundary_impulse_tracer_CSp => NULL()
   type(dyed_obc_tracer_CS), pointer :: dyed_obc_tracer_CSp => NULL()
   type(nw2_tracers_CS), pointer :: nw2_tracers_CSp => NULL()
+  type(FABM_tracer_CS), pointer :: FABM_tracer_CSp => NULL()
   !>@}
 end type tracer_flow_control_CS
 
@@ -237,6 +242,9 @@ subroutine call_tracer_register(G, GV, US, param_file, CS, tr_Reg, restart_CS)
   call get_param(param_file, mdl, "USE_NW2_TRACERS", CS%use_nw2_tracers, &
                  "If true, use the NeverWorld2 tracers.", &
                  default=.false.)
+  call get_param(param_file, mdl, "USE_FABM_TRACERS", CS%use_FABM_tracer, &
+                 "If true, use the FABM tracer bridge.", &
+                 default=.false.)
 
 !    Add other user-provided calls to register tracers for restarting here. Each
 !  tracer package registration call returns a logical false if it cannot be run
@@ -288,6 +296,8 @@ subroutine call_tracer_register(G, GV, US, param_file, CS, tr_Reg, restart_CS)
                              tr_Reg, restart_CS)
   if (CS%use_nw2_tracers) CS%use_nw2_tracers = &
     register_nw2_tracers(G%HI, GV, US, param_file, CS%nw2_tracers_CSp, tr_Reg, restart_CS)
+  if (CS%use_FABM_tracer) CS%use_FABM_tracer = &
+    register_FABM_tracer(G, GV, US, param_file, CS%FABM_tracer_CSp, tr_Reg, restart_CS)
 
 end subroutine call_tracer_register
 
@@ -371,6 +381,9 @@ subroutine tracer_flow_control_init(restart, day, G, GV, US, h, param_file, diag
     call initialize_dyed_obc_tracer(restart, day, G, GV, h, diag, OBC, CS%dyed_obc_tracer_CSp)
   if (CS%use_nw2_tracers) &
     call initialize_nw2_tracers(restart, day, G, GV, US, h, tv, diag, CS%nw2_tracers_CSp)
+  if (CS%use_FABM_tracer) &
+    call initialize_FABM_tracer(restart, day, G, GV, US, h, param_file, diag, OBC, &
+                                CS%FABM_tracer_CSp, sponge_CSp, tv)
 
 end subroutine tracer_flow_control_init
 
@@ -458,6 +471,8 @@ subroutine call_tracer_set_forcing(sfc_state, fluxes, day_start, day_interval, G
 
   if (CS%use_MARBL_tracers) &
     call MARBL_tracers_set_forcing(day_start, G, CS%MARBL_tracers_CSp)
+  if (CS%use_FABM_tracer) &
+    call FABM_tracer_set_forcing(day_start, G, CS%FABM_tracer_CSp)
 
 end subroutine call_tracer_set_forcing
 
@@ -686,6 +701,10 @@ subroutine call_tracer_column_fns(h_old, h_new, ea, eb, fluxes, mld, dt, G, GV, 
                                       G, GV, US, CS%dyed_obc_tracer_CSp)
     if (CS%use_nw2_tracers) call nw2_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, &
                                                            G, GV, US, tv, CS%nw2_tracers_CSp)
+    if (CS%use_FABM_tracer) call FABM_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, &
+                                 G, GV, US, tv, CS%FABM_tracer_CSp, &
+                                 prediabatic_T=prediabatic_T, &
+                                 prediabatic_S=prediabatic_S)
   endif
 
 end subroutine call_tracer_column_fns
@@ -941,6 +960,8 @@ subroutine call_tracer_surface_state(sfc_state, h, G, GV, US, CS)
     call OCMIP2_CFC_surface_state(sfc_state, h, G, GV, US, CS%OCMIP2_CFC_CSp)
   if (CS%use_MOM_generic_tracer) &
     call MOM_generic_tracer_surface_state(sfc_state, h, G, GV, CS%MOM_generic_tracer_CSp)
+  if (CS%use_FABM_tracer) &
+    call FABM_tracer_surface_state(sfc_state, h, G, GV, US, CS%FABM_tracer_CSp)
 
 end subroutine call_tracer_surface_state
 
@@ -965,6 +986,7 @@ subroutine tracer_flow_control_end(CS)
   if (CS%use_boundary_impulse_tracer) call boundary_impulse_tracer_end(CS%boundary_impulse_tracer_CSp)
   if (CS%use_dyed_obc_tracer) call dyed_obc_tracer_end(CS%dyed_obc_tracer_CSp)
   if (CS%use_nw2_tracers) call nw2_tracers_end(CS%nw2_tracers_CSp)
+  if (CS%use_FABM_tracer) call FABM_tracer_end(CS%FABM_tracer_CSp)
 
   if (associated(CS)) deallocate(CS)
 end subroutine tracer_flow_control_end
