@@ -631,6 +631,13 @@ subroutine call_tracer_column_fns(h_old, h_new, ea, eb, fluxes, mld, dt, G, GV, 
                                      G, GV, US, tv, CS%nw2_tracers_CSp, &
                                      evap_CFL_limit=evap_CFL_limit, &
                                      minimum_forcing_depth=minimum_forcing_depth)
+    if (CS%use_FABM_tracer) &
+      call FABM_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, &
+                                      G, GV, US, tv, CS%FABM_tracer_CSp, &
+                                      prediabatic_T=prediabatic_T, &
+                                      prediabatic_S=prediabatic_S, &
+                                      evap_CFL_limit=evap_CFL_limit, &
+                                      minimum_forcing_depth=minimum_forcing_depth)
   else ! Apply tracer surface fluxes using ea on the first layer
     if (CS%use_USER_tracer_example) &
       call tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, &
