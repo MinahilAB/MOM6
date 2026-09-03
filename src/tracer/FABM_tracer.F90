@@ -2,7 +2,17 @@
 ! See the LICENSE file for licensing information.
 ! SPDX-License-Identifier: Apache-2.0
 !> Minimal, column-by-column FABM interior-state bridge for MOM6.
+!!
+!! FABM owns the ecosystem formulation and state-variable metadata; MOM6 owns
+!! prognostic tracer storage, transport, restarts and diagnostics. This module
+!! links both models column by column. It supports FABM interior state variables
+!! only; surface- and bottom-attached states need separate 2-D MOM6 storage.
+! FABM is optional at compile time. Keep an empty module body in ordinary
+! MOM6 builds so this source file need not be removed from a source list.
 module FABM_tracer
+#ifndef _FABM_
+implicit none
+#else
 use fabm, only : fabm_create_model, type_fabm_model, fabm_standard_variables
 use MOM_diag_mediator, only : diag_ctrl, register_diag_field, post_data
 use MOM_error_handler, only : MOM_error, FATAL
@@ -13,6 +23,8 @@ use MOM_open_boundary, only : ocean_OBC_type
 use MOM_restart, only : MOM_restart_CS
 use MOM_sponge, only : sponge_CS
 use MOM_time_manager, only : time_type
+use MOM_tracer_diabatic, only : tracer_vertdiff, applyTracerBoundaryFluxesInOut
+use MOM_tracer_initialization_from_Z, only : MOM_initialize_tracer_from_Z
 use MOM_tracer_registry, only : register_tracer, tracer_registry_type
 use MOM_unit_scaling, only : unit_scale_type
 use MOM_variables, only : surface, thermo_var_ptrs
@@ -26,6 +38,10 @@ type, public :: FABM_tracer_CS ; private
   type(diag_ctrl), pointer :: diag => NULL() !< MOM diagnostic control structure.
   real, pointer :: tr(:,:,:,:) => NULL() !< MOM tracer storage [conc].
   real, pointer :: sources(:,:,:,:) => NULL() !< FABM interior sources [conc s-1].
+  real, pointer :: surface_flux(:,:,:) => NULL() !< FABM surface fluxes [conc m s-1].
+  real, pointer :: bottom_flux(:,:,:) => NULL() !< FABM bottom fluxes [conc m s-1].
+  real, pointer :: bottom_state_sources(:,:,:) => NULL() !< FABM bottom-state sources [state s-1].
+  real, pointer :: vertical_velocity(:,:,:,:) => NULL() !< FABM movement velocities [m s-1].
   real, pointer :: diagnostics(:,:,:,:) => NULL() !< FABM interior diagnostics.
   real, pointer :: temperature(:,:,:) => NULL() !< Potential temperature [degC].
   real, pointer :: salinity(:,:,:) => NULL() !< Practical salinity [ppt].
@@ -38,14 +54,21 @@ type, public :: FABM_tracer_CS ; private
   real, pointer :: mask(:,:,:) => NULL() !< FABM wet-cell mask [nondim].
   integer, pointer :: bottom_index(:,:) => NULL() !< Bottom layer index [nondim].
   character(len=200) :: config_file = 'fabm.yaml' !< FABM configuration.
+  character(len=200) :: initial_conditions_file = '' !< Optional cold-start 3-D FABM state file.
+  logical :: initial_conditions_ongrid = .false. !< If true, IC file is already on the MOM6 horizontal grid.
   real :: light_attenuation !< PAR attenuation [m-1].
   real :: fallback_surface_par !< Explicit PAR fallback [native heat-flux units].
   integer :: ntr = 0 !< Number of FABM interior states.
   integer :: nidiag = 0 !< Number of FABM interior diagnostic variables.
   integer, allocatable :: id_source(:) !< MOM diagnostic IDs for FABM state sources.
+  integer, allocatable :: id_surface_flux(:) !< MOM diagnostic IDs for FABM surface fluxes.
+  integer, allocatable :: id_bottom_flux(:) !< MOM diagnostic IDs for FABM bottom fluxes.
+  integer, allocatable :: id_vertical_velocity(:) !< MOM diagnostic IDs for FABM movement velocities.
   integer, allocatable :: id_diagnostic(:) !< MOM diagnostic IDs for FABM diagnostics.
 end type FABM_tracer_CS
 contains
+!> Create FABM and register every YAML-declared interior state as a MOM6 tracer.
+!! MOM6 consequently owns advection, restart and standard tracer diagnostics.
 logical function register_FABM_tracer(G, GV, US, param_file, CS, tr_Reg, restart_CS)
   type(ocean_grid_type), intent(in) :: G
   type(verticalGrid_type), intent(in) :: GV
@@ -64,6 +87,13 @@ logical function register_FABM_tracer(G, GV, US, param_file, CS, tr_Reg, restart
   call log_version(param_file, mdl, version, '')
   call get_param(param_file, mdl, 'FABM_CONFIG_FILE', CS%config_file, &
                  'YAML configuration file for FABM.', default='fabm.yaml')
+  call get_param(param_file, mdl, 'FABM_INITIAL_CONDITIONS_FILE', CS%initial_conditions_file, &
+                 'Optional NetCDF file used to initialize all FABM interior states on a cold start. '//&
+                 'Variables must have the same names and units as the FABM interior state variables. '//&
+                 'A restart always takes precedence.', default='')
+  call get_param(param_file, mdl, 'FABM_INITIAL_CONDITIONS_ON_GRID', CS%initial_conditions_ongrid, &
+                 'If true, FABM_INITIAL_CONDITIONS_FILE is already on the MOM6 horizontal tracer grid. '//&
+                 'If false, MOM6 laterally regrids the file.', default=.false.)
   call get_param(param_file, mdl, 'FABM_LIGHT_ATTENUATION', CS%light_attenuation, &
                  'Exponential attenuation used to estimate in-water PAR.', units='m-1', &
                  default=0.04, scale=US%m_to_L**(-1))
@@ -72,6 +102,7 @@ logical function register_FABM_tracer(G, GV, US, param_file, CS, tr_Reg, restart
                  'A negative value requires shortwave forcing.', units='W m-2', &
                  default=-1.0, scale=US%W_m2_to_QRZ_T)
   CS%model => fabm_create_model(path=trim(CS%config_file))
+  ! No NPZD names are hard-coded: another FABM interior-state model can use this bridge.
   CS%ntr = size(CS%model%interior_state_variables)
   if (CS%ntr == 0) call MOM_error(FATAL, 'register_FABM_tracer: no FABM interior states.')
   allocate(CS%tr(G%isd:G%ied,G%jsd:G%jed,GV%ke,CS%ntr), source=0.0)
@@ -87,6 +118,9 @@ logical function register_FABM_tracer(G, GV, US, param_file, CS, tr_Reg, restart
   enddo
   register_FABM_tracer = .true.
 end function register_FABM_tracer
+!> Allocate FABM work arrays, link MOM6 environmental fields and initialize FABM.
+!! FABM receives local 1:nx,1:ny array sections after set_domain; MOM6 retains
+!! its local-domain bounds, so the links below are views with explicit sections.
 subroutine initialize_FABM_tracer(restart, day, G, GV, US, h, param_file, diag, OBC, CS, sponge_CSp, tv)
   logical, intent(in) :: restart
   type(time_type), target, intent(in) :: day
@@ -101,16 +135,39 @@ subroutine initialize_FABM_tracer(restart, day, G, GV, US, h, param_file, diag, 
   type(sponge_CS), pointer :: sponge_CSp
   type(thermo_var_ptrs), intent(in) :: tv
   integer :: i, j, k, n
+  real, pointer :: tr_ptr(:,:,:) => NULL()
   character(len=96) :: field_name
   if (.not.associated(CS)) return
   allocate(CS%sources(G%isd:G%ied,G%jsd:G%jed,GV%ke,CS%ntr), source=0.0)
+  allocate(CS%surface_flux(G%isd:G%ied,G%jsd:G%jed,CS%ntr), source=0.0)
+  allocate(CS%bottom_flux(G%isd:G%ied,G%jsd:G%jed,CS%ntr), source=0.0)
+  ! Zero-length placeholder: attached bottom states are not implemented, but FABM
+  ! bottom fluxes on interior tracers can still be queried through this interface.
+  allocate(CS%bottom_state_sources(G%isd:G%ied,G%jsd:G%jed,0), source=0.0)
+  allocate(CS%vertical_velocity(G%isd:G%ied,G%jsd:G%jed,GV%ke,CS%ntr), source=0.0)
+  if (size(CS%model%surface_state_variables) > 0 .or. size(CS%model%bottom_state_variables) > 0) &
+    call MOM_error(FATAL, "FABM bridge does not yet support surface- or bottom-attached state variables.")
   CS%diag => diag
   allocate(CS%id_source(CS%ntr), source=0)
+  allocate(CS%id_surface_flux(CS%ntr), source=0)
+  allocate(CS%id_bottom_flux(CS%ntr), source=0)
+  allocate(CS%id_vertical_velocity(CS%ntr), source=0)
   do n=1,CS%ntr
     field_name = "fabm_"//trim(CS%model%interior_state_variables(n)%name)//"_source"
     CS%id_source(n) = register_diag_field("ocean_model", trim(field_name), diag%axesTL, day, &
       "FABM source tendency: "//trim(CS%model%interior_state_variables(n)%long_name), &
       trim(CS%model%interior_state_variables(n)%units)//" s-1")
+    field_name = "fabm_"//trim(CS%model%interior_state_variables(n)%name)//"_surface_flux"
+    CS%id_surface_flux(n) = register_diag_field("ocean_model", trim(field_name), diag%axesT1, day, &
+      "FABM surface flux: "//trim(CS%model%interior_state_variables(n)%long_name), &
+      trim(CS%model%interior_state_variables(n)%units)//" m s-1")
+    field_name = "fabm_"//trim(CS%model%interior_state_variables(n)%name)//"_bottom_flux"
+    CS%id_bottom_flux(n) = register_diag_field("ocean_model", trim(field_name), diag%axesT1, day, &
+      "FABM bottom flux: "//trim(CS%model%interior_state_variables(n)%long_name), &
+      trim(CS%model%interior_state_variables(n)%units)//" m s-1")
+    field_name = "fabm_"//trim(CS%model%interior_state_variables(n)%name)//"_vertical_velocity"
+    CS%id_vertical_velocity(n) = register_diag_field("ocean_model", trim(field_name), diag%axesTL, day, &
+      "FABM vertical velocity (positive upward): "//trim(CS%model%interior_state_variables(n)%long_name), "m s-1")
   enddo
   CS%nidiag = size(CS%model%interior_diagnostic_variables)
   allocate(CS%id_diagnostic(CS%nidiag), source=0)
@@ -140,6 +197,7 @@ subroutine initialize_FABM_tracer(restart, day, G, GV, US, h, param_file, diag, 
   do n=1,CS%ntr
     call CS%model%link_interior_state_data(n, CS%tr(:,:,:,n))
   enddo
+  ! These links are views, not copies; MOM6 refreshes them before each FABM call.
   call CS%model%link_interior_data(fabm_standard_variables%downwelling_photosynthetic_radiative_flux, CS%par)
   call CS%model%link_interior_data(fabm_standard_variables%temperature, CS%temperature)
   call CS%model%link_interior_data(fabm_standard_variables%practical_salinity, CS%salinity)
@@ -157,17 +215,38 @@ subroutine initialize_FABM_tracer(restart, day, G, GV, US, h, param_file, diag, 
   call CS%model%start()
   if (CS%nidiag > 0) allocate(CS%diagnostics(G%isd:G%ied,G%jsd:G%jed,GV%ke,CS%nidiag), source=0.0)
   if (.not.restart) then
-    do n=1,CS%ntr ; do k=1,GV%ke ; do j=G%jsd,G%jed ; do i=G%isd,G%ied
-      CS%tr(i,j,k,n) = CS%model%interior_state_variables(n)%initial_value
-    enddo ; enddo ; enddo ; enddo
+    if (len_trim(CS%initial_conditions_file) > 0) then
+      ! Reuse MOM6's tested z-space tracer initializer. This supports source
+      ! files on a different horizontal grid as well as files already remapped
+      ! to the MOM6 tracer grid. The file must use FABM state names and units.
+      do n=1,CS%ntr
+        tr_ptr => CS%tr(:,:,:,n)
+        call MOM_initialize_tracer_from_Z(h, tr_ptr, G, GV, US, param_file, &
+          trim(CS%initial_conditions_file), trim(CS%model%interior_state_variables(n)%name), &
+          ongrid=CS%initial_conditions_ongrid)
+      enddo
+    else
+      ! Preserve the YAML-declared uniform initialization used by existing cases.
+      do n=1,CS%ntr ; do k=1,GV%ke ; do j=G%jsd,G%jed ; do i=G%isd,G%ied
+        CS%tr(i,j,k,n) = CS%model%interior_state_variables(n)%initial_value
+      enddo ; enddo ; enddo ; enddo
+    endif
   endif
 end subroutine initialize_FABM_tracer
+!> FABM has no separate forcing stage in this bridge.
+!! Time-varying radiation and physical fields are supplied from MOM6 fluxes in
+!! FABM_tracer_column_physics immediately before each FABM evaluation.
 subroutine FABM_tracer_set_forcing(day_start, G, CS)
   type(time_type), intent(in) :: day_start
   type(ocean_grid_type), intent(in) :: G
   type(FABM_tracer_CS), pointer :: CS
 end subroutine FABM_tracer_set_forcing
-!> Apply FABM interior sources. Boundary fluxes, attached states and sinking are not yet supported.
+!> Apply one FABM update within MOM6 column physics.
+!! The sequence is: refresh environment; construct PAR; obtain FABM sources,
+!! boundary fluxes and vertical movement; apply MOM6 vertical diffusion/fluxes;
+!! add local biological sources; then transport relative vertical movement.
+!! Attached surface/bottom states remain unsupported, but fluxes on interior
+!! tracers and interior vertical movement are applied here.
 subroutine FABM_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, G, GV, US, tv, CS, &
   prediabatic_T, prediabatic_S, evap_CFL_limit, minimum_forcing_depth)
   type(ocean_grid_type), intent(in) :: G
@@ -181,10 +260,14 @@ subroutine FABM_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, G, GV, U
   real, dimension(:,:,:), optional, intent(in) :: prediabatic_T, prediabatic_S
   real, optional, intent(in) :: evap_CFL_limit, minimum_forcing_depth
   real :: depth, par0
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: h_work
   integer :: i, j, k, n
   if (.not.associated(CS)) return
+  ! Use post-entrainment thickness and, in the modern path, pre-diabatic T/S.
   call update_FABM_environment(h_new, G, GV, US, tv, CS, prediabatic_T, prediabatic_S)
   do j=G%jsd,G%jed ; do i=G%isd,G%ied
+    ! Prefer MOM6 visible direct+diffuse shortwave. If only total shortwave is
+    ! available, 0.42 is MOM6s visible fraction; the fallback is for idealized cases.
     if (associated(fluxes%sw_vis_dir) .and. associated(fluxes%sw_vis_dif)) then
       par0 = US%QRZ_T_to_W_m2 * (fluxes%sw_vis_dir(i,j) + fluxes%sw_vis_dif(i,j))
     elseif (associated(fluxes%sw)) then
@@ -196,6 +279,7 @@ subroutine FABM_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, G, GV, U
       call MOM_error(FATAL, 'FABM bridge requires visible or total shortwave, or FABM_SURFACE_PAR.')
     endif
     CS%surface_par(i,j) = par0 ; depth = 0.0
+    ! Beer--Lambert PAR at layer centres: PAR [W m-2], attenuation [m-1].
     do k=1,GV%ke
       depth = depth + (0.5 * h_new(i,j,k) * GV%H_to_MKS)
       CS%par(i,j,k) = par0 * exp(-CS%light_attenuation * depth)
@@ -203,17 +287,90 @@ subroutine FABM_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, G, GV, U
     enddo
   enddo ; enddo
   CS%sources(:,:,:,:) = 0.0
+  CS%surface_flux(:,:,:) = 0.0
+  CS%bottom_flux(:,:,:) = 0.0
+  CS%vertical_velocity(:,:,:,:) = 0.0
+  ! FABM tendencies returned below have units of state concentration per second.
   call CS%model%prepare_inputs()
+  do j=G%jsd,G%jed
+    call CS%model%get_surface_sources(1, G%ied-G%isd+1, j-G%jsd+1, &
+                                       CS%surface_flux(G%isd:G%ied,j,:))
+    call CS%model%get_bottom_sources(1, G%ied-G%isd+1, j-G%jsd+1, &
+                                      CS%bottom_flux(G%isd:G%ied,j,:), &
+                                      CS%bottom_state_sources(G%isd:G%ied,j,:))
+  enddo
   do k=1,GV%ke ; do j=G%jsd,G%jed
     call CS%model%get_interior_sources(1, G%ied-G%isd+1, j-G%jsd+1, k, &
                                        CS%sources(G%isd:G%ied,j,k,:))
   enddo ; enddo
+  call CS%model%finalize_outputs()
+  do k=1,GV%ke ; do j=G%jsd,G%jed
+    call CS%model%get_vertical_movement(1, G%ied-G%isd+1, j-G%jsd+1, k, &
+                                         CS%vertical_velocity(G%isd:G%ied,j,k,:))
+  enddo ; enddo
+  do n=1,CS%ntr
+    ! Apply FABM boundary fluxes through MOM6's standard vertical tracer operator,
+    ! retaining MOM6 evaporation and flux conventions.
+    do k=1,GV%ke ; do j=G%jsd,G%jed ; do i=G%isd,G%ied
+      h_work(i,j,k) = h_old(i,j,k)
+    enddo ; enddo ; enddo
+    if (present(evap_CFL_limit) .and. present(minimum_forcing_depth)) &
+      call applyTracerBoundaryFluxesInOut(G, GV, CS%tr(:,:,:,n), dt, fluxes, h_work, &
+                                           evap_CFL_limit, minimum_forcing_depth)
+    call tracer_vertdiff(h_work, ea, eb, dt, CS%tr(:,:,:,n), G, GV, &
+                         sfc_flux=GV%Rho0*CS%surface_flux(:,:,n), &
+                         btm_flux=GV%Rho0*CS%bottom_flux(:,:,n))
+  enddo
+  ! dt [s] times source [concentration s-1] gives a concentration increment.
   do n=1,CS%ntr ; do k=1,GV%ke ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
     CS%tr(i,j,k,n) = CS%tr(i,j,k,n) + (dt * CS%sources(i,j,k,n))
   enddo ; enddo ; enddo ; enddo
-  call CS%model%finalize_outputs()
+  call apply_FABM_vertical_movement(h_new, dt, G, GV, CS)
   call post_FABM_diagnostics(CS)
 end subroutine FABM_tracer_column_physics
+
+!> Move FABM interior states relative to the water with conservative first-order upwind transport.
+!! FABM velocities are positive upward; MOM6 layer index increases downward.
+!! The sign is reversed when forming MOM6 interface fluxes. Surface and seabed
+!! interface fluxes are zero, conserving material in the water column but not yet
+!! representing export to a sediment/benthic FABM state. Subcycling limits CFL.
+subroutine apply_FABM_vertical_movement(h, dt, G, GV, CS)
+  type(ocean_grid_type), intent(in) :: G
+  type(verticalGrid_type), intent(in) :: GV
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in) :: h
+  real, intent(in) :: dt
+  type(FABM_tracer_CS), pointer :: CS
+  real :: flux(1:GV%ke+1), tr_new(1:GV%ke), w_interface, dt_sub, max_cfl
+  integer :: i, j, k, n, nsub, isub
+  if (.not.associated(CS)) return
+  max_cfl = 0.0
+  do n=1,CS%ntr ; do k=2,GV%ke ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
+    w_interface = 0.5 * (CS%vertical_velocity(i,j,k-1,n) + CS%vertical_velocity(i,j,k,n))
+    max_cfl = max(max_cfl, abs(w_interface) * dt / &
+                  max(h(i,j,k-1)*GV%H_to_MKS, h(i,j,k)*GV%H_to_MKS))
+  enddo ; enddo ; enddo ; enddo
+  nsub = max(1, ceiling(max_cfl / 0.5))
+  dt_sub = dt / real(nsub)
+  do isub=1,nsub ; do n=1,CS%ntr ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
+    flux(1) = 0.0
+    do k=2,GV%ke
+      w_interface = -0.5 * (CS%vertical_velocity(i,j,k-1,n) + CS%vertical_velocity(i,j,k,n))
+      if (w_interface >= 0.0) then
+        flux(k) = w_interface * CS%tr(i,j,k-1,n)
+      else
+        flux(k) = w_interface * CS%tr(i,j,k,n)
+      endif
+    enddo
+    flux(GV%ke+1) = 0.0
+    do k=1,GV%ke
+      tr_new(k) = CS%tr(i,j,k,n) + dt_sub * (flux(k)-flux(k+1)) / &
+                  (h(i,j,k)*GV%H_to_MKS)
+    enddo
+    do k=1,GV%ke
+      CS%tr(i,j,k,n) = tr_new(k)
+    enddo
+  enddo ; enddo ; enddo ; enddo
+end subroutine apply_FABM_vertical_movement
 subroutine post_FABM_diagnostics(CS)
   type(FABM_tracer_CS), pointer :: CS
   real, pointer :: fabm_diagnostic(:,:,:) => NULL()
@@ -221,6 +378,10 @@ subroutine post_FABM_diagnostics(CS)
   if (.not.associated(CS)) return
   do n=1,CS%ntr
     if (CS%id_source(n) > 0) call post_data(CS%id_source(n), CS%sources(:,:,:,n), CS%diag)
+    if (CS%id_surface_flux(n) > 0) call post_data(CS%id_surface_flux(n), CS%surface_flux(:,:,n), CS%diag)
+    if (CS%id_bottom_flux(n) > 0) call post_data(CS%id_bottom_flux(n), CS%bottom_flux(:,:,n), CS%diag)
+    if (CS%id_vertical_velocity(n) > 0) &
+      call post_data(CS%id_vertical_velocity(n), CS%vertical_velocity(:,:,:,n), CS%diag)
   enddo
   do n=1,CS%nidiag
     if (CS%id_diagnostic(n) <= 0) cycle
@@ -231,7 +392,8 @@ subroutine post_FABM_diagnostics(CS)
   enddo
 end subroutine post_FABM_diagnostics
 !> Update standard FABM environmental fields from MOM6 state.
-!! Density is the MOM6 reference density; in-situ density will be added with the EOS stage.
+!! Thickness/depth are in m, pressure is approximated in dbar, and density is
+!! currently the MOM6 reference density rather than in-situ EOS density.
 subroutine update_FABM_environment(h, G, GV, US, tv, CS, prediabatic_T, prediabatic_S)
   type(ocean_grid_type), intent(in) :: G
   type(verticalGrid_type), intent(in) :: GV
@@ -253,6 +415,7 @@ subroutine update_FABM_environment(h, G, GV, US, tv, CS, prediabatic_T, prediaba
   elseif (associated(tv%S)) then
     CS%salinity(:,:,:) = tv%S(G%isd:G%ied,G%jsd:G%jed,:) * US%S_to_ppt
   endif
+  ! Adequate for NPZD; density-sensitive FABM models need an in-situ EOS link.
   CS%density(:,:,:) = US%R_to_kg_m3 * GV%Rho0
   do j=G%jsd,G%jed ; do i=G%isd,G%ied
     z = 0.0
@@ -265,6 +428,9 @@ subroutine update_FABM_environment(h, G, GV, US, tv, CS, prediabatic_T, prediaba
     enddo
   enddo ; enddo
 end subroutine update_FABM_environment
+!> Placeholder for FABM contributions to the coupled MOM6 surface state.
+!! It is intentionally empty: this bridge has no FABM surface-attached state or
+!! direct atmosphere--biogeochemistry exchange implementation yet.
 subroutine FABM_tracer_surface_state(sfc_state, h, G, GV, US, CS)
   type(surface), intent(inout) :: sfc_state
   type(ocean_grid_type), intent(in) :: G
@@ -279,4 +445,5 @@ subroutine FABM_tracer_end(CS)
   if (associated(CS%model)) then ; call CS%model%finalize() ; deallocate(CS%model) ; endif
   deallocate(CS)
 end subroutine FABM_tracer_end
+#endif
 end module FABM_tracer

@@ -51,6 +51,8 @@ To quickly get started and build an ocean-only MOM6 executable, see the
 For setting up an experiment, or building an executable for coupled modeling,
 consult the [MOM6-examples wiki](https://github.com/NOAA-GFDL/MOM6-examples/wiki).
 
+FABM build and run guidance is in [docs/FABM.md](docs/FABM.md).
+
 
 # Disclaimer
 
