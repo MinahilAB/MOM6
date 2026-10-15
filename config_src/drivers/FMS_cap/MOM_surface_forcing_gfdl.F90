@@ -201,6 +201,7 @@ type, public :: ice_ocean_boundary_type
   real, pointer, dimension(:,:) :: p               =>NULL() !< pressure of overlying ice and atmosphere
                                                             !< on ocean surface [Pa]
   real, pointer, dimension(:,:) :: mi              =>NULL() !< mass of ice per unit ocean area [kg m-2]
+  real, pointer, dimension(:,:) :: ice_fraction    =>NULL() !< total sea-ice area fraction [1]
   real, pointer, dimension(:,:) :: ice_rigidity    =>NULL() !< rigidity of the sea ice, sea-ice and
                                                             !! ice-shelves, expressed as a coefficient
                                                             !! for divergence damping, as determined
@@ -588,6 +589,15 @@ subroutine convert_IOB_to_fluxes(IOB, fluxes, index_bounds, Time, valid_time, G,
       enddo ; enddo
     endif
     fluxes%accumulate_p_surf = .true. ! Multiple components may contribute to surface pressure.
+  endif
+
+  ! Transfer the instantaneous SIS2 total ice area to the MOM6 ocean grid.
+  ! This nondimensional field is consumed by FABM light models before their
+  ! biogeochemical sources are evaluated.
+  if (associated(IOB%ice_fraction) .and. associated(fluxes%ice_fraction)) then
+    do j=js,je ; do i=is,ie
+      fluxes%ice_fraction(i,j) = G%mask2dT(i,j) * min(1.0, max(0.0, IOB%ice_fraction(i-i0,j-j0)))
+    enddo ; enddo
   endif
 
   ! more salt restoring logic

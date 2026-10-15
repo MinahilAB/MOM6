@@ -3653,8 +3653,12 @@ subroutine allocate_forcing_by_group(G, fluxes, water, heat, ustar, press, &
   call myAlloc(fluxes%area_berg,isd,ied,jsd,jed, iceberg)
   call myAlloc(fluxes%mass_berg,isd,ied,jsd,jed, iceberg)
 
+  ! Sea-ice area is a generic ocean-surface property.  Keep it available to
+  ! tracer packages (including FABM) independently of CFC, MARBL, or waves.
+  ! Drivers without sea ice retain the zero value supplied by myAlloc.
+  call myAlloc(fluxes%ice_fraction,isd,ied,jsd,jed, .true.)
+
   !These fields should only be allocated when USE_CFC_CAP is activated.
-  call myAlloc(fluxes%ice_fraction,isd,ied,jsd,jed, cfc)
   call myAlloc(fluxes%u10_sqr,isd,ied,jsd,jed, cfc)
 
   !These fields should only be allocated when wave coupling is activated.

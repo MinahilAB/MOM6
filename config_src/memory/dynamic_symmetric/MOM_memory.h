@@ -23,7 +23,12 @@
 !/// The maximum permitted number (each) of restart variables, time derivatives, etc.
 !/// This is mostly used for the size of pointer arrays, so it should be set generously.
 #ifndef MAX_FIELDS_
-#define MAX_FIELDS_ 50
+/*
+ * FABM/biogeochemistry configurations can register substantially more than
+ * the ocean's standard T/S tracer set. This remains a small pointer-array
+ * allocation, so leave enough generic headroom for full BFM configurations.
+ */
+#define MAX_FIELDS_ 100
 #endif
 
 !/// The number of memory halo cells on each side of the computational domain in the i-direction.

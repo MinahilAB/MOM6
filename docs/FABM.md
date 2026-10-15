@@ -6,9 +6,11 @@ This branch provides an optional, generic FABM bridge for **interior** FABM
 state variables.  FABM state variables declared in `fabm.yaml` are registered
 as MOM6 tracers and therefore use MOM6 transport, diagnostics and restarts.
 The bridge supplies temperature, practical salinity, reference density,
-pressure, depth, layer thickness and photosynthetically active radiation (PAR).
-It supports interior sources, surface and bottom fluxes on interior tracers,
-and FABM vertical movement.  Surface-attached and bottom-attached FABM state
+pressure, depth, layer thickness, PAR and its background attenuation coefficient, total downwelling shortwave radiation,
+10-m wind speed, tracer-grid latitude/longitude and calendar day-of-year.
+Atmospheric CO2 and surface air pressure are supplied from MOM6 when available,
+or from documented runtime fallbacks. It supports interior sources, surface and
+bottom fluxes on interior tracers, and FABM vertical movement.  Surface-attached and bottom-attached FABM state
 variables are deliberately rejected until their 2-D storage, diagnostics and
 restart support are implemented.
 
@@ -63,7 +65,28 @@ Add the following to `MOM_override` or `MOM_input` for a FABM-enabled run:
 USE_FABM_TRACERS = True
 FABM_CONFIG_FILE = "fabm.yaml"
 FABM_LIGHT_ATTENUATION = 0.04
+
+! Optional fallbacks used when an atmospheric field is not retained by MOM6.
+FABM_WIND_SPEED = 0.0                 ! m s-1
+FABM_SURFACE_AIR_PRESSURE = 101325.0  ! Pa
+FABM_ATMOSPHERIC_CO2 = 420.0          ! 1e-6 (ppm)
+
+! Recommended for ALE/isopycnal cases with contracted inactive layers.
+FABM_CONTRACTED_LAYER_BUG = False
+FABM_MINIMUM_ACTIVE_THICKNESS = 0.1    ! m
+FABM_MAXIMUM_VERTICAL_SUBSTEPS = 100   ! fail-fast safety limit
 ```
+
+With the bug flag disabled, the bridge refreshes FABM's mask and bottom index
+from MOM6 layer thickness before each call. This prevents vertical movement
+from treating minimum-thickness inactive layers as part of the water column.
+The cutoff must also be large enough for the configured timestep and maximum
+FABM sinking speed. For OM1 with a 7200-s timestep and 30 m day-1 sinking,
+0.1 m limits the vertical-transport calculation to about 50 substeps.
+
+If the YAML configuration sets `log: true`, only the root MPI rank writes
+FABM's debug log files. This avoids concurrent replacement and writing of the
+same files by every rank on a shared filesystem.
 
 For a fresh start from a NetCDF file containing one variable per FABM interior
 state (same variable names and units as FABM):
