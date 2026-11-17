@@ -16,6 +16,7 @@ MOM6 (Modular Ocean Model, version 6) is a next-generation open-development-sour
 # Where to find information
 
 - [MOM6-examples wiki](https://github.com/NOAA-GFDL/MOM6-examples/wiki) -- installation instructions and tutorials
+- [MOM6--FABM--BFM Wiki](https://github.com/MinahilAB/MOM6-examples/wiki) -- build, data, run and reproducibility workflow for this FABM bridge
 - [Source code documentation](https://mom6.readthedocs.io/en/main/) -- hosted on Read the Docs
 - [Developers wiki](https://github.com/NOAA-GFDL/MOM6/wiki) -- developer guides and conventions
 - [Developer workflow](https://github.com/NOAA-GFDL/MOM6/wiki/Developer-workflow)
@@ -51,7 +52,10 @@ To quickly get started and build an ocean-only MOM6 executable, see the
 For setting up an experiment, or building an executable for coupled modeling,
 consult the [MOM6-examples wiki](https://github.com/NOAA-GFDL/MOM6-examples/wiki).
 
-FABM build and run guidance is in [docs/FABM.md](docs/FABM.md).
+FABM bridge architecture and ocean-only build guidance are in
+[docs/FABM.md](docs/FABM.md). Coupled MOM6--SIS2--FABM/BFM case setup,
+external data, initial conditions and troubleshooting are in the
+[MOM6--FABM--BFM Wiki](https://github.com/MinahilAB/MOM6-examples/wiki).
 
 
 # Disclaimer

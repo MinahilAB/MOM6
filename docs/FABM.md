@@ -20,8 +20,11 @@ fatal error rather than silently omitting biology.
 
 ## Reproducible source set
 
-This document describes the source side of the bridge.  Coupled SIS2 builds
-also require a compatible `MOM6-examples` checkout; see its `FABM_PORT.md`.
+This document describes the source side of the bridge. Coupled SIS2 builds
+also require a compatible `MOM6-examples` checkout; see the examples-side
+[compatibility guide](https://github.com/MinahilAB/MOM6-examples/blob/fabm-port-examples/FABM_PORT.md)
+and the [MOM6--FABM--BFM Wiki](https://github.com/MinahilAB/MOM6-examples/wiki)
+for case setup, external datasets, initial conditions and troubleshooting.
 Record the three Git revisions for every experiment:
 
 ```text
